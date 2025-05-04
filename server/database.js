@@ -193,6 +193,50 @@ function createTables() {
     }
   });
 
+  // Course groups table (depends on courses)
+  db.run(`CREATE TABLE IF NOT EXISTS course_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_id INTEGER NOT NULL,
+    group_name TEXT NOT NULL,
+    max_students INTEGER DEFAULT 30,
+    professor_name TEXT,
+    time_slot TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (course_id) REFERENCES courses (id)
+  )`, (err) => {
+    if (err) {
+      console.error('Error creating course_groups table', err.message);
+    } else {
+      console.log('Course groups table created or already exists');
+    }
+  });
+
+  // Update enrollments table to include group_id if it doesn't exist
+  db.all("PRAGMA table_info(enrollments)", (err, rows) => {
+    if (err) {
+      console.error('Error checking enrollments table schema:', err.message);
+    } else {
+      // Check if group_id column exists
+      const hasGroupIdColumn = rows.some(row => row.name === 'group_id');
+      if (!hasGroupIdColumn) {
+        // Add group_id column
+        db.run("ALTER TABLE enrollments ADD COLUMN group_id INTEGER DEFAULT NULL", (err) => {
+          if (err) {
+            console.error('Error adding group_id column to enrollments table:', err.message);
+          } else {
+            console.log('Added group_id column to enrollments table');
+            // Add foreign key constraint
+            db.run("PRAGMA foreign_keys = ON", (err) => {
+              if (err) {
+                console.error('Error enabling foreign keys:', err.message);
+              }
+            });
+          }
+        });
+      }
+    }
+  });
+
   // System settings table
   db.run(`CREATE TABLE IF NOT EXISTS system_settings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -238,6 +282,44 @@ function createTables() {
                 console.error('Error inserting default max_courses_limit setting:', err.message);
               } else {
                 console.log('Default max_courses_limit setting inserted');
+              }
+            }
+          );
+        }
+      });
+
+      // Add auto_logout setting if it doesn't exist
+      db.get('SELECT * FROM system_settings WHERE key = ?', ['auto_logout_enabled'], (err, row) => {
+        if (err) {
+          console.error('Error checking auto_logout_enabled setting:', err.message);
+        } else if (!row) {
+          // Default to enabled
+          db.run('INSERT INTO system_settings (key, value) VALUES (?, ?)',
+            ['auto_logout_enabled', 'true'],
+            (err) => {
+              if (err) {
+                console.error('Error inserting default auto_logout_enabled setting:', err.message);
+              } else {
+                console.log('Default auto_logout_enabled setting inserted');
+              }
+            }
+          );
+        }
+      });
+
+      // Add auto_logout_timeout setting if it doesn't exist
+      db.get('SELECT * FROM system_settings WHERE key = ?', ['auto_logout_timeout'], (err, row) => {
+        if (err) {
+          console.error('Error checking auto_logout_timeout setting:', err.message);
+        } else if (!row) {
+          // Default to 30 seconds
+          db.run('INSERT INTO system_settings (key, value) VALUES (?, ?)',
+            ['auto_logout_timeout', '30'],
+            (err) => {
+              if (err) {
+                console.error('Error inserting default auto_logout_timeout setting:', err.message);
+              } else {
+                console.log('Default auto_logout_timeout setting inserted');
               }
             }
           );

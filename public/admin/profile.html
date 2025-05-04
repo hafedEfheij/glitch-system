@@ -11,6 +11,8 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- Responsive CSS -->
     <link rel="stylesheet" href="../css/responsive.css">
+    <!-- Auto Logout CSS -->
+    <link rel="stylesheet" href="../css/auto-logout.css">
 </head>
 <body>
     <div class="container-fluid">
@@ -117,10 +119,12 @@
                                     <div class="col-md-6">
                                         <label for="admin-username" class="form-label">رقم القيد الجديد (اسم المستخدم)</label>
                                         <input type="text" class="form-control" id="admin-username" required>
+                                        <small class="form-text text-muted">يمكن استخدام الحروف العربية والإنجليزية، ويراعى حساسية الحروف الكبيرة والصغيرة</small>
                                     </div>
                                     <div class="col-md-6">
                                         <label for="admin-password" class="form-label">رقم المنظومة الجديد (كلمة المرور)</label>
                                         <input type="password" class="form-control" id="admin-password" required>
+                                        <small class="form-text text-muted">يمكن استخدام الحروف العربية والإنجليزية، ويراعى حساسية الحروف الكبيرة والصغيرة</small>
                                     </div>
                                     <div class="col-md-6">
                                         <label for="admin-password-confirm" class="form-label">تأكيد رقم المنظومة الجديد</label>
@@ -165,6 +169,110 @@
                         </div>
                     </div>
                 </div>
+
+                <div class="row mt-4">
+                    <div class="col-md-12">
+                        <div class="card">
+                            <div class="card-header bg-primary text-white">
+                                <h5 class="card-title mb-0">إعدادات تسجيل الخروج التلقائي</h5>
+                            </div>
+                            <div class="card-body">
+                                <div id="auto-logout-update-success" class="alert alert-success d-none" role="alert">
+                                    <i class="fas fa-check-circle me-2"></i>
+                                    تم تحديث إعدادات تسجيل الخروج التلقائي بنجاح
+                                </div>
+                                <div id="auto-logout-update-error" class="alert alert-danger d-none" role="alert">
+                                    <i class="fas fa-exclamation-circle me-2"></i>
+                                    حدث خطأ أثناء تحديث إعدادات تسجيل الخروج التلقائي
+                                </div>
+
+                                <div class="card border-0 shadow-sm mb-4">
+                                    <div class="card-header bg-primary text-white py-3">
+                                        <h5 class="card-title mb-0">
+                                            <i class="fas fa-shield-alt me-2"></i>
+                                            إعدادات تسجيل الخروج التلقائي
+                                        </h5>
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="row mb-4">
+                                            <div class="col-12">
+                                                <div class="alert alert-info border-start border-info border-4">
+                                                    <i class="fas fa-info-circle me-2"></i>
+                                                    تعزز هذه الميزة أمان النظام من خلال تسجيل خروج المستخدمين تلقائيًا بعد فترة من الخمول. يمكنك تفعيل أو تعطيل هذه الميزة وتحديد المدة الزمنية المناسبة.
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <form id="auto-logout-settings-form" class="row g-4">
+                                            <div class="col-md-6">
+                                                <div class="card h-100 border-0 shadow-sm">
+                                                    <div class="card-body">
+                                                        <h6 class="card-title text-primary mb-3">
+                                                            <i class="fas fa-toggle-on me-2"></i>
+                                                            حالة الميزة
+                                                        </h6>
+                                                        <div class="form-check form-switch form-switch-lg mb-3">
+                                                            <input class="form-check-input" type="checkbox" id="auto-logout-enabled">
+                                                            <label class="form-check-label ms-2 fw-bold" for="auto-logout-enabled">تفعيل تسجيل الخروج التلقائي</label>
+                                                        </div>
+                                                        <p class="form-text text-muted">
+                                                            <i class="fas fa-info-circle me-1"></i>
+                                                            عند تفعيل هذه الخاصية، سيتم تسجيل خروج المستخدم تلقائيًا بعد فترة من الخمول لتعزيز أمان النظام.
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <div class="col-md-6">
+                                                <div class="card h-100 border-0 shadow-sm auto-logout-current-timeout-card">
+                                                    <div class="card-body">
+                                                        <h6 class="card-title text-primary mb-3">
+                                                            <i class="fas fa-stopwatch me-2"></i>
+                                                            إعداد المؤقت
+                                                        </h6>
+                                                        <label for="auto-logout-timeout" class="form-label fw-bold">مدة الخمول (بالثواني)</label>
+                                                        <div class="input-group mb-3">
+                                                            <span class="input-group-text bg-primary text-white">
+                                                                <i class="fas fa-clock"></i>
+                                                            </span>
+                                                            <input type="number" class="form-control form-control-lg" id="auto-logout-timeout" min="5" required>
+                                                            <span class="input-group-text bg-primary text-white" id="current-timeout-display-container">
+                                                                <span id="current-timeout-display" class="text-white fw-bold">--:--</span>
+                                                            </span>
+                                                        </div>
+                                                        <div class="d-flex align-items-center">
+                                                            <small class="form-text text-muted flex-grow-1">
+                                                                <i class="fas fa-info-circle me-1"></i>
+                                                                المدة الزمنية بالثواني قبل تسجيل الخروج التلقائي (الحد الأدنى 5 ثوان)
+                                                            </small>
+                                                            <small class="text-primary ms-2">
+                                                                <i class="fas fa-clock me-1"></i>
+                                                                <span>دقيقة:ثانية</span>
+                                                            </small>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <div class="col-12 mt-4">
+                                                <div class="d-flex justify-content-end">
+                                                    <button type="button" class="btn btn-outline-secondary me-2" id="reset-auto-logout-settings">
+                                                        <i class="fas fa-undo me-1"></i>
+                                                        إعادة تعيين
+                                                    </button>
+                                                    <button type="submit" class="btn btn-primary">
+                                                        <i class="fas fa-save me-1"></i>
+                                                        حفظ الإعدادات
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </form>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -176,5 +284,7 @@
     <!-- Custom JS -->
     <script src="../js/main.js"></script>
     <script src="../js/admin-profile.js"></script>
+    <!-- Auto Logout JS -->
+    <script src="../js/auto-logout.js"></script>
 </body>
 </html>

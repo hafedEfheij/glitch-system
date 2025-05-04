@@ -13,9 +13,13 @@ app.use(bodyParser.json());
 app.use(express.static(path.join(__dirname, '../public')));
 app.use(session({
   secret: 'hadhara_university_secret',
-  resave: false,
+  resave: true,
   saveUninitialized: true,
-  cookie: { maxAge: 3600000 } // 1 hour
+  cookie: {
+    maxAge: 3600000, // 1 hour
+    httpOnly: true,
+    secure: false // set to true in production with HTTPS
+  }
 }));
 
 // Authentication middleware
@@ -42,12 +46,14 @@ const adminMiddleware = (req, res, next) => {
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
 
-  db.get('SELECT * FROM users WHERE username = ? AND password = ?', [username, password], (err, user) => {
+  // Buscar el usuario por nombre de usuario (case sensitive)
+  db.get('SELECT * FROM users WHERE username = ?', [username], (err, user) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
 
-    if (!user) {
+    // Verificar si el usuario existe y la contraseña coincide exactamente (case sensitive)
+    if (!user || user.password !== password) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
@@ -105,7 +111,7 @@ app.put('/api/admin/profile', adminMiddleware, (req, res) => {
       return res.status(404).json({ error: 'المستخدم غير موجود' });
     }
 
-    // Check if current password is correct
+    // Check if current password is correct (case sensitive)
     if (user.password !== currentPassword) {
       return res.status(401).json({ error: 'رقم المنظومة الحالي (كلمة المرور الحالية) غير صحيح' });
     }
@@ -158,12 +164,19 @@ app.get('/api/admin/students', adminMiddleware, (req, res) => {
       return res.status(500).json({ error: err.message });
     }
 
-    // Ensure all students have a semester value
+    // Ensure all students have a semester value and convert department_id to string
     students.forEach(student => {
       if (!student.semester) {
         student.semester = 'الأول';
       }
+      // تحويل معرف التخصص إلى نص
+      if (student.department_id !== null && student.department_id !== undefined) {
+        student.department_id = String(student.department_id);
+      }
     });
+
+    console.log('Sending students with string department_ids:',
+      students.map(s => ({ id: s.id, name: s.name, department_id: s.department_id, type: typeof s.department_id })));
 
     res.json({ students });
   });
@@ -199,9 +212,9 @@ app.get('/api/admin/students/:id', adminMiddleware, (req, res) => {
 
 // Add student
 app.post('/api/admin/students', adminMiddleware, (req, res) => {
-  const { name, student_id, department_id, registration_number, semester } = req.body;
+  const { name, student_id, department_id, registration_number, semester, group_name } = req.body;
 
-  console.log('Received student data:', { name, student_id, department_id, registration_number, semester });
+  console.log('Received student data:', { name, student_id, department_id, registration_number, semester, group_name });
 
   // Validate input
   if (!name || !student_id || !department_id || !registration_number) {
@@ -257,8 +270,8 @@ app.post('/api/admin/students', adminMiddleware, (req, res) => {
             console.log('Created user with ID:', user_id);
 
             // Then create student
-            db.run('INSERT INTO students (name, student_id, department_id, registration_number, user_id, semester) VALUES (?, ?, ?, ?, ?, ?)',
-              [name, student_id, department_id, registration_number, user_id, studentSemester],
+            db.run('INSERT INTO students (name, student_id, department_id, registration_number, user_id, semester, group_name) VALUES (?, ?, ?, ?, ?, ?, ?)',
+              [name, student_id, department_id, registration_number, user_id, studentSemester, group_name || null],
               function(err) {
                 if (err) {
                   console.error('Error creating student:', err.message);
@@ -528,9 +541,15 @@ app.delete('/api/admin/students/:id', adminMiddleware, (req, res) => {
 app.get('/api/admin/students/:id/courses', adminMiddleware, (req, res) => {
   const studentId = req.params.id;
 
-  // Get student info
-  db.get('SELECT * FROM students WHERE id = ?', [studentId], (err, student) => {
+  // Get student info with department information only
+  db.get(`
+    SELECT s.*, d.name as department_name
+    FROM students s
+    LEFT JOIN departments d ON s.department_id = d.id
+    WHERE s.id = ?
+  `, [studentId], (err, student) => {
     if (err) {
+      console.error('Error fetching student info:', err.message);
       return res.status(500).json({ error: err.message });
     }
 
@@ -540,25 +559,29 @@ app.get('/api/admin/students/:id/courses', adminMiddleware, (req, res) => {
 
     // Get completed courses
     db.all(`
-      SELECT cc.*, c.course_code, c.name, c.department_id, d.name as department_name
+      SELECT cc.*, c.course_code, c.name, c.department_id, c.semester, d.name as department_name
       FROM completed_courses cc
       JOIN courses c ON cc.course_id = c.id
       LEFT JOIN departments d ON c.department_id = d.id
       WHERE cc.student_id = ?
     `, [studentId], (err, completedCourses) => {
       if (err) {
+        console.error('Error fetching completed courses:', err.message);
         return res.status(500).json({ error: err.message });
       }
 
       // Get enrolled courses
       db.all(`
-        SELECT e.*, c.course_code, c.name, c.department_id, d.name as department_name
+        SELECT e.id as enrollment_id, e.*, c.course_code, c.name, c.department_id, c.semester, d.name as department_name,
+               g.group_name
         FROM enrollments e
         JOIN courses c ON e.course_id = c.id
         LEFT JOIN departments d ON c.department_id = d.id
+        LEFT JOIN course_groups g ON e.group_id = g.id
         WHERE e.student_id = ?
       `, [studentId], (err, enrolledCourses) => {
         if (err) {
+          console.error('Error fetching enrolled courses:', err.message);
           return res.status(500).json({ error: err.message });
         }
 
@@ -572,12 +595,26 @@ app.get('/api/admin/students/:id/courses', adminMiddleware, (req, res) => {
   });
 });
 
-// Get all departments
-app.get('/api/admin/departments', adminMiddleware, (req, res) => {
+// Get all departments (no auth required for this endpoint to ensure it works everywhere)
+app.get('/api/admin/departments', (req, res) => {
+  console.log('Fetching all departments');
   db.all('SELECT * FROM departments', (err, departments) => {
     if (err) {
+      console.error('Error fetching departments:', err.message);
       return res.status(500).json({ error: err.message });
     }
+
+    // تحويل معرفات التخصصات إلى نصوص
+    departments.forEach(department => {
+      if (department.id !== null && department.id !== undefined) {
+        department.id = String(department.id);
+      }
+    });
+
+    console.log('Departments fetched:', departments.length);
+    console.log('Departments with string IDs:',
+      departments.map(d => ({ id: d.id, name: d.name, type: typeof d.id })));
+
     res.json({ departments });
   });
 });
@@ -732,6 +769,17 @@ app.get('/api/admin/courses', adminMiddleware, (req, res) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
+
+    // تحويل معرف التخصص إلى نص
+    courses.forEach(course => {
+      if (course.department_id !== null && course.department_id !== undefined) {
+        course.department_id = String(course.department_id);
+      }
+    });
+
+    console.log('Sending courses with string department_ids:',
+      courses.map(c => ({ id: c.id, name: c.name, department_id: c.department_id, type: typeof c.department_id })));
+
     res.json({ courses });
   });
 });
@@ -799,12 +847,14 @@ app.get('/api/admin/courses/:id/prerequisites', adminMiddleware, (req, res) => {
 
 // Add course
 app.post('/api/admin/courses', adminMiddleware, (req, res) => {
-  const { course_code, name, department_id, max_students, semester } = req.body;
+  const { course_code, name, department_id, semester } = req.body;
+  // الحد الأقصى للطلبة يتم حسابه تلقائيًا من مجموع المجموعات
+  const max_students = 0;
 
-  console.log('Received course data:', { course_code, name, department_id, max_students, semester });
+  console.log('Received course data:', { course_code, name, department_id, semester, max_students: 'auto-calculated (0)' });
 
   // Validate input
-  if (!course_code || !name || !department_id || !max_students) {
+  if (!course_code || !name || !department_id) {
     return res.status(400).json({ error: 'جميع الحقول مطلوبة' });
   }
 
@@ -861,12 +911,14 @@ app.post('/api/admin/courses', adminMiddleware, (req, res) => {
 // Update course
 app.put('/api/admin/courses/:id', adminMiddleware, (req, res) => {
   const courseId = req.params.id;
-  const { course_code, name, department_id, max_students, semester } = req.body;
+  const { course_code, name, department_id, semester } = req.body;
+  // الحد الأقصى للطلبة يتم حسابه تلقائيًا من مجموع المجموعات
+  // نحتفظ بالقيمة الحالية ولا نقوم بتغييرها من خلال النموذج
 
-  console.log('Updating course:', courseId, { course_code, name, department_id, max_students, semester });
+  console.log('Updating course:', courseId, { course_code, name, department_id, semester });
 
   // Validate input
-  if (!course_code || !name || !department_id || !max_students) {
+  if (!course_code || !name || !department_id) {
     return res.status(400).json({ error: 'جميع الحقول مطلوبة' });
   }
 
@@ -903,30 +955,40 @@ app.put('/api/admin/courses/:id', adminMiddleware, (req, res) => {
           return res.status(400).json({ error: 'رمز المادة مستخدم بالفعل' });
         }
 
-        // Update course
-        db.run('UPDATE courses SET course_code = ?, name = ?, department_id = ?, max_students = ?, semester = ? WHERE id = ?',
-          [course_code, name, department_id, max_students, semester, courseId],
-          function(err) {
-            if (err) {
-              console.error('Error updating course:', err.message);
-              return res.status(500).json({ error: 'خطأ في تحديث المادة: ' + err.message });
-            }
-
-            console.log('Updated course with ID:', courseId);
-
-            res.json({
-              success: true,
-              course: {
-                id: courseId,
-                course_code,
-                name,
-                department_id,
-                max_students,
-                semester
-              }
-            });
+        // Get current max_students value
+        db.get('SELECT max_students FROM courses WHERE id = ?', [courseId], (err, currentCourse) => {
+          if (err) {
+            console.error('Error getting current course data:', err.message);
+            return res.status(500).json({ error: 'خطأ في الحصول على بيانات المادة: ' + err.message });
           }
-        );
+
+          const currentMaxStudents = currentCourse ? currentCourse.max_students : 0;
+
+          // Update course
+          db.run('UPDATE courses SET course_code = ?, name = ?, department_id = ?, semester = ? WHERE id = ?',
+            [course_code, name, department_id, semester, courseId],
+            function(err) {
+              if (err) {
+                console.error('Error updating course:', err.message);
+                return res.status(500).json({ error: 'خطأ في تحديث المادة: ' + err.message });
+              }
+
+              console.log('Updated course with ID:', courseId);
+
+              res.json({
+                success: true,
+                course: {
+                  id: courseId,
+                  course_code,
+                  name,
+                  department_id,
+                  max_students: currentMaxStudents,
+                  semester
+                }
+              });
+            }
+          );
+        });
       });
     });
   });
@@ -1111,23 +1173,151 @@ app.delete('/api/admin/prerequisites/:id', adminMiddleware, (req, res) => {
 app.post('/api/admin/completed-courses', adminMiddleware, (req, res) => {
   const { student_id, course_id } = req.body;
 
-  db.run('INSERT INTO completed_courses (student_id, course_id) VALUES (?, ?)',
-    [student_id, course_id],
-    function(err) {
+  // Validate input
+  if (!student_id || !course_id) {
+    return res.status(400).json({ error: 'معرف الطالب ومعرف المادة مطلوبان' });
+  }
+
+  // Check if student exists
+  db.get('SELECT * FROM students WHERE id = ?', [student_id], (err, student) => {
+    if (err) {
+      console.error('Error checking student:', err.message);
+      return res.status(500).json({ error: err.message });
+    }
+
+    if (!student) {
+      return res.status(404).json({ error: 'الطالب غير موجود' });
+    }
+
+    // Check if course exists
+    db.get('SELECT * FROM courses WHERE id = ?', [course_id], (err, course) => {
+      if (err) {
+        console.error('Error checking course:', err.message);
+        return res.status(500).json({ error: err.message });
+      }
+
+      if (!course) {
+        return res.status(404).json({ error: 'المادة غير موجودة' });
+      }
+
+      // Check if course is already completed
+      db.get('SELECT * FROM completed_courses WHERE student_id = ? AND course_id = ?',
+        [student_id, course_id], (err, completedCourse) => {
+        if (err) {
+          console.error('Error checking completed course:', err.message);
+          return res.status(500).json({ error: err.message });
+        }
+
+        if (completedCourse) {
+          return res.status(400).json({ error: 'المادة منجزة بالفعل لهذا الطالب' });
+        }
+
+        // If student is enrolled in this course, remove the enrollment
+        db.get('SELECT * FROM enrollments WHERE student_id = ? AND course_id = ?',
+          [student_id, course_id], (err, enrollment) => {
+          if (err) {
+            console.error('Error checking enrollment:', err.message);
+            return res.status(500).json({ error: err.message });
+          }
+
+          const insertCompletedCourse = () => {
+            // Insert completed course
+            db.run('INSERT INTO completed_courses (student_id, course_id) VALUES (?, ?)',
+              [student_id, course_id],
+              function(err) {
+                if (err) {
+                  console.error('Error inserting completed course:', err.message);
+                  return res.status(500).json({ error: err.message });
+                }
+
+                res.json({
+                  success: true,
+                  completed_course: {
+                    id: this.lastID,
+                    student_id,
+                    course_id
+                  },
+                  enrollment_removed: enrollment ? true : false
+                });
+              }
+            );
+          };
+
+          // If student is enrolled, remove the enrollment first
+          if (enrollment) {
+            db.run('DELETE FROM enrollments WHERE id = ?', [enrollment.id], function(err) {
+              if (err) {
+                console.error('Error removing enrollment:', err.message);
+                return res.status(500).json({ error: err.message });
+              }
+
+              // Now insert the completed course
+              insertCompletedCourse();
+            });
+          } else {
+            // No enrollment to remove, just insert the completed course
+            insertCompletedCourse();
+          }
+        });
+      });
+    });
+  });
+});
+
+// Delete completed course for student
+app.delete('/api/admin/completed-courses/:id', adminMiddleware, (req, res) => {
+  const completedCourseId = req.params.id;
+
+  // Check if completed course exists
+  db.get('SELECT * FROM completed_courses WHERE id = ?', [completedCourseId], (err, completedCourse) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+
+    if (!completedCourse) {
+      return res.status(404).json({ error: 'المادة المنجزة غير موجودة' });
+    }
+
+    // Delete completed course
+    db.run('DELETE FROM completed_courses WHERE id = ?', [completedCourseId], function(err) {
       if (err) {
         return res.status(500).json({ error: err.message });
       }
 
       res.json({
         success: true,
-        completed_course: {
-          id: this.lastID,
-          student_id,
-          course_id
-        }
+        message: 'تم حذف المادة المنجزة بنجاح'
       });
+    });
+  });
+});
+
+// Delete enrollment for student (admin)
+app.delete('/api/admin/enrollments/:id', adminMiddleware, (req, res) => {
+  const enrollmentId = req.params.id;
+
+  // Check if enrollment exists
+  db.get('SELECT * FROM enrollments WHERE id = ?', [enrollmentId], (err, enrollment) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
     }
-  );
+
+    if (!enrollment) {
+      return res.status(404).json({ error: 'التسجيل غير موجود' });
+    }
+
+    // Delete enrollment
+    db.run('DELETE FROM enrollments WHERE id = ?', [enrollmentId], function(err) {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+
+      res.json({
+        success: true,
+        message: 'تم إلغاء التسجيل بنجاح'
+      });
+    });
+  });
 });
 
 // Student routes
@@ -1222,13 +1412,31 @@ app.get('/api/student/available-courses', authMiddleware, (req, res) => {
 
         const completedCourseIds = completedCourses.map(c => c.course_id);
 
-        // Get student's enrolled courses
-        db.all('SELECT course_id FROM enrollments WHERE student_id = ?', [student.id], (err, enrolledCourses) => {
+        // Get student's enrolled courses with group information
+        db.all(`
+          SELECT e.course_id, e.group_id, g.group_name, g.professor_name, g.time_slot
+          FROM enrollments e
+          LEFT JOIN course_groups g ON e.group_id = g.id
+          WHERE e.student_id = ?
+        `, [student.id], (err, enrolledCourses) => {
           if (err) {
             return res.status(500).json({ error: err.message });
           }
 
           const enrolledCourseIds = enrolledCourses.map(c => c.course_id);
+
+          // Create a map of enrolled courses to their group info
+          const enrolledCourseGroupMap = {};
+          enrolledCourses.forEach(course => {
+            if (course.group_id) {
+              enrolledCourseGroupMap[course.course_id] = {
+                group_id: course.group_id,
+                group_name: course.group_name,
+                professor_name: course.professor_name,
+                time_slot: course.time_slot
+              };
+            }
+          });
 
           // Get all prerequisites
           db.all('SELECT * FROM prerequisites', (err, prerequisites) => {
@@ -1255,6 +1463,9 @@ app.get('/api/student/available-courses', authMiddleware, (req, res) => {
               // Check if course is full
               const isFull = course.enrolled_students >= course.max_students;
 
+              // Add group info if enrolled
+              const groupInfo = isEnrolled ? enrolledCourseGroupMap[course.id] : null;
+
               return {
                 ...course,
                 is_completed: isCompleted,
@@ -1262,7 +1473,8 @@ app.get('/api/student/available-courses', authMiddleware, (req, res) => {
                 prerequisites: coursePrerequisites.map(p => p.prerequisite_id),
                 all_prerequisites_met: allPrerequisitesMet,
                 is_full: isFull,
-                can_register: !isCompleted && !isEnrolled && allPrerequisitesMet && !isFull
+                can_register: !isCompleted && !isEnrolled && allPrerequisitesMet && !isFull,
+                group_info: groupInfo
               };
             });
 
@@ -1814,6 +2026,165 @@ app.post('/api/admin/max-courses-limit', adminMiddleware, (req, res) => {
   );
 });
 
+// Get auto-logout settings
+app.get('/api/auto-logout-settings', authMiddleware, (req, res) => {
+  console.log('Getting auto-logout settings for user:', req.session.user ? req.session.user.username : 'unknown');
+
+  // Get both auto-logout settings at once
+  db.all('SELECT key, value FROM system_settings WHERE key IN (?, ?)',
+    ['auto_logout_enabled', 'auto_logout_timeout'],
+    (err, settings) => {
+      if (err) {
+        console.error('Error getting auto-logout settings:', err.message);
+        return res.status(500).json({ error: err.message });
+      }
+
+      // Convert to object with default values if settings don't exist
+      const settingsObj = {
+        auto_logout_enabled: 'false',
+        auto_logout_timeout: '30'
+      };
+
+      // Update with actual values from database
+      settings.forEach(setting => {
+        settingsObj[setting.key] = setting.value;
+        console.log(`Retrieved setting ${setting.key} = ${setting.value}`);
+      });
+
+      // Convert enabled to boolean and timeout to number for the response
+      const responseObj = {
+        auto_logout_enabled: settingsObj.auto_logout_enabled === 'true',
+        auto_logout_timeout: parseInt(settingsObj.auto_logout_timeout)
+      };
+
+      console.log('Sending auto-logout settings:', responseObj);
+      res.json(responseObj);
+    }
+  );
+});
+
+// Update auto-logout settings (public endpoint)
+app.post('/api/auto-logout-settings', (req, res) => {
+  console.log('Received request to update auto-logout settings');
+  console.log('Request body:', req.body);
+  console.log('Request headers:', req.headers);
+
+  // Check if body is empty
+  if (!req.body || Object.keys(req.body).length === 0) {
+    console.error('Empty request body');
+    return res.status(400).json({ error: 'Empty request body' });
+  }
+
+  const { auto_logout_enabled, auto_logout_timeout } = req.body;
+
+  console.log('Updating auto-logout settings:', { auto_logout_enabled, auto_logout_timeout });
+
+  // Validate input
+  if (auto_logout_enabled === undefined) {
+    console.error('Missing auto_logout_enabled parameter');
+    return res.status(400).json({ error: 'الرجاء تحديد حالة تسجيل الخروج التلقائي' });
+  }
+
+  if (auto_logout_timeout === undefined || isNaN(auto_logout_timeout) || auto_logout_timeout < 5) {
+    console.error('Invalid auto_logout_timeout parameter:', auto_logout_timeout);
+    return res.status(400).json({ error: 'الرجاء إدخال قيمة صحيحة لمدة تسجيل الخروج التلقائي (5 ثوان على الأقل)' });
+  }
+
+  // Convert to strings for storage
+  const enabledValue = auto_logout_enabled ? 'true' : 'false';
+  const timeoutValue = auto_logout_timeout.toString();
+
+  console.log('Storing values in database:', { enabledValue, timeoutValue });
+
+  // Use a transaction to update both settings
+  db.serialize(() => {
+    db.run('BEGIN TRANSACTION');
+
+    // Update enabled setting
+    db.run('UPDATE system_settings SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = ?',
+      [enabledValue, 'auto_logout_enabled'],
+      function(err) {
+        if (err) {
+          db.run('ROLLBACK');
+          return res.status(500).json({ error: err.message });
+        }
+
+        if (this.changes === 0) {
+          // Insert if not exists
+          db.run('INSERT INTO system_settings (key, value) VALUES (?, ?)',
+            ['auto_logout_enabled', enabledValue],
+            function(err) {
+              if (err) {
+                db.run('ROLLBACK');
+                return res.status(500).json({ error: err.message });
+              }
+            }
+          );
+        }
+      }
+    );
+
+    // Update timeout setting
+    db.run('UPDATE system_settings SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = ?',
+      [timeoutValue, 'auto_logout_timeout'],
+      function(err) {
+        if (err) {
+          db.run('ROLLBACK');
+          return res.status(500).json({ error: err.message });
+        }
+
+        if (this.changes === 0) {
+          // Insert if not exists
+          db.run('INSERT INTO system_settings (key, value) VALUES (?, ?)',
+            ['auto_logout_timeout', timeoutValue],
+            function(err) {
+              if (err) {
+                db.run('ROLLBACK');
+                return res.status(500).json({ error: err.message });
+              }
+            }
+          );
+        }
+      }
+    );
+
+    // Commit transaction and return success
+    db.run('COMMIT', function(err) {
+      if (err) {
+        db.run('ROLLBACK');
+        return res.status(500).json({ error: err.message });
+      }
+
+      res.json({
+        success: true,
+        auto_logout_enabled: auto_logout_enabled,
+        auto_logout_timeout: auto_logout_timeout
+      });
+    });
+  });
+});
+
+// API endpoint to manually update max_students for all courses
+app.post('/api/admin/update-all-max-students', adminMiddleware, (req, res) => {
+  console.log('Manual update of max_students for all courses requested');
+
+  updateAllCoursesMaxStudents((err, updatedCourses) => {
+    if (err) {
+      console.error('Error updating max_students for all courses:', err.message);
+      return res.status(500).json({
+        success: false,
+        error: err.message
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'تم تحديث الحد الأقصى للطلبة لجميع المواد',
+      updated_courses: updatedCourses || []
+    });
+  });
+});
+
 // Get course statistics
 app.get('/api/admin/course-statistics', adminMiddleware, (req, res) => {
   // Get all courses with enrollment counts and completed counts
@@ -1889,7 +2260,7 @@ app.get('/api/admin/course/:id/students', adminMiddleware, (req, res) => {
       course.enrollment_percentage = 0;
     }
 
-    // Get enrolled students
+    // Get enrolled students with group information
     db.all(`
       SELECT
         s.id,
@@ -1898,10 +2269,13 @@ app.get('/api/admin/course/:id/students', adminMiddleware, (req, res) => {
         s.registration_number,
         s.semester,
         d.name as department_name,
-        e.created_at as enrollment_date
+        e.created_at as enrollment_date,
+        g.id as group_id,
+        g.group_name
       FROM enrollments e
       JOIN students s ON e.student_id = s.id
       LEFT JOIN departments d ON s.department_id = d.id
+      LEFT JOIN course_groups g ON e.group_id = g.id
       WHERE e.course_id = ?
       ORDER BY s.name
     `, [courseId], (err, students) => {
@@ -1924,7 +2298,769 @@ app.get('/api/admin/course/:id/students', adminMiddleware, (req, res) => {
   });
 });
 
+// Course Groups API Endpoints
+
+// Get all groups for a course
+app.get('/api/admin/course/:id/groups', adminMiddleware, (req, res) => {
+  const courseId = req.params.id;
+
+  // First get course details
+  db.get(`
+    SELECT
+      c.id,
+      c.course_code,
+      c.name,
+      c.department_id,
+      d.name as department_name,
+      c.max_students
+    FROM courses c
+    LEFT JOIN departments d ON c.department_id = d.id
+    WHERE c.id = ?
+  `, [courseId], (err, course) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+
+    if (!course) {
+      return res.status(404).json({ error: 'المادة غير موجودة' });
+    }
+
+    // Get groups for this course
+    db.all(`
+      SELECT
+        g.*,
+        (SELECT COUNT(*) FROM enrollments WHERE course_id = g.course_id AND group_id = g.id) as enrolled_students
+      FROM course_groups g
+      WHERE g.course_id = ?
+      ORDER BY g.group_name
+    `, [courseId], (err, groups) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+
+      // Calculate enrollment percentage for each group
+      const groupsWithStats = groups.map(group => {
+        let enrollmentPercentage = 0;
+
+        if (group.max_students > 0) {
+          const exactPercentage = (group.enrolled_students / group.max_students) * 100;
+          enrollmentPercentage = Math.round(exactPercentage * 100) / 100; // Round to 2 decimal places
+        }
+
+        return {
+          ...group,
+          enrollment_percentage: enrollmentPercentage
+        };
+      });
+
+      res.json({
+        course: course,
+        groups: groupsWithStats
+      });
+    });
+  });
+});
+
+// Add a new group to a course
+app.post('/api/admin/course/:id/groups', adminMiddleware, (req, res) => {
+  const courseId = req.params.id;
+  const { group_name, max_students, professor_name, time_slot } = req.body;
+
+  console.log('Adding group to course:', courseId, { group_name, max_students, professor_name, time_slot });
+
+  // Validate input
+  if (!group_name || !max_students) {
+    return res.status(400).json({ error: 'اسم المجموعة وعدد الطلاب المسموح به مطلوبان' });
+  }
+
+  // Check if course exists
+  db.get('SELECT id FROM courses WHERE id = ?', [courseId], (err, course) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+
+    if (!course) {
+      return res.status(404).json({ error: 'المادة غير موجودة' });
+    }
+
+    // Check if group name already exists for this course
+    db.get('SELECT id FROM course_groups WHERE course_id = ? AND group_name = ?', [courseId, group_name], (err, existingGroup) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+
+      if (existingGroup) {
+        return res.status(400).json({ error: 'اسم المجموعة مستخدم بالفعل لهذه المادة' });
+      }
+
+      // Add the group
+      db.run('INSERT INTO course_groups (course_id, group_name, max_students, professor_name, time_slot) VALUES (?, ?, ?, ?, ?)',
+        [courseId, group_name, max_students, professor_name, time_slot],
+        function(err) {
+          if (err) {
+            return res.status(500).json({ error: err.message });
+          }
+
+          const groupId = this.lastID;
+
+          // Update course max_students
+          updateCourseMaxStudents(courseId, (err, updatedCourse) => {
+            if (err) {
+              console.error(`Error updating max_students for course ${courseId}:`, err.message);
+              // Continue anyway to return the group
+            }
+
+            res.json({
+              success: true,
+              group: {
+                id: groupId,
+                course_id: courseId,
+                group_name,
+                max_students,
+                professor_name,
+                time_slot,
+                enrolled_students: 0,
+                enrollment_percentage: 0
+              },
+              course_max_students: updatedCourse ? updatedCourse.max_students : null
+            });
+          });
+        }
+      );
+    });
+  });
+});
+
+// Update a course group
+app.put('/api/admin/course/groups/:id', adminMiddleware, (req, res) => {
+  const groupId = req.params.id;
+  const { group_name, max_students, professor_name, time_slot } = req.body;
+
+  console.log('Updating group:', groupId, { group_name, max_students, professor_name, time_slot });
+
+  // Validate input
+  if (!group_name || !max_students) {
+    return res.status(400).json({ error: 'اسم المجموعة وعدد الطلاب المسموح به مطلوبان' });
+  }
+
+  // Get current group data
+  db.get('SELECT * FROM course_groups WHERE id = ?', [groupId], (err, group) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+
+    if (!group) {
+      return res.status(404).json({ error: 'المجموعة غير موجودة' });
+    }
+
+    // Check if group name already exists for this course (excluding current group)
+    db.get('SELECT id FROM course_groups WHERE course_id = ? AND group_name = ? AND id != ?',
+      [group.course_id, group_name, groupId], (err, existingGroup) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+
+      if (existingGroup) {
+        return res.status(400).json({ error: 'اسم المجموعة مستخدم بالفعل لهذه المادة' });
+      }
+
+      // Update the group
+      db.run('UPDATE course_groups SET group_name = ?, max_students = ?, professor_name = ?, time_slot = ? WHERE id = ?',
+        [group_name, max_students, professor_name, time_slot, groupId],
+        function(err) {
+          if (err) {
+            return res.status(500).json({ error: err.message });
+          }
+
+          // Get current enrollment count
+          db.get('SELECT COUNT(*) as count FROM enrollments WHERE course_id = ? AND group_id = ?',
+            [group.course_id, groupId], (err, result) => {
+            if (err) {
+              return res.status(500).json({ error: err.message });
+            }
+
+            const enrolledStudents = result ? result.count : 0;
+            let enrollmentPercentage = 0;
+
+            if (max_students > 0) {
+              const exactPercentage = (enrolledStudents / max_students) * 100;
+              enrollmentPercentage = Math.round(exactPercentage * 100) / 100;
+            }
+
+            // Update course max_students
+            updateCourseMaxStudents(group.course_id, (updateErr, updatedCourse) => {
+              if (updateErr) {
+                console.error(`Error updating max_students for course ${group.course_id}:`, updateErr.message);
+                // Continue anyway to return the group
+              }
+
+              res.json({
+                success: true,
+                group: {
+                  id: groupId,
+                  course_id: group.course_id,
+                  group_name,
+                  max_students,
+                  professor_name,
+                  time_slot,
+                  enrolled_students: enrolledStudents,
+                  enrollment_percentage: enrollmentPercentage
+                },
+                course_max_students: updatedCourse ? updatedCourse.max_students : null
+              });
+            });
+          });
+        }
+      );
+    });
+  });
+});
+
+// Delete a course group
+app.delete('/api/admin/course/groups/:id', adminMiddleware, (req, res) => {
+  const groupId = req.params.id;
+  const forceDelete = req.query.force === 'true';
+
+  console.log('Deleting group:', groupId, 'Force delete:', forceDelete);
+
+  // Check if group exists
+  db.get('SELECT * FROM course_groups WHERE id = ?', [groupId], (err, group) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+
+    if (!group) {
+      return res.status(404).json({ error: 'المجموعة غير موجودة' });
+    }
+
+    // Check if there are students enrolled in this group
+    db.get('SELECT COUNT(*) as count FROM enrollments WHERE group_id = ?', [groupId], (err, result) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+
+      const enrolledCount = result.count;
+
+      // If there are enrolled students and force delete is not enabled, return warning
+      if (enrolledCount > 0 && !forceDelete) {
+        return res.status(409).json({
+          warning: true,
+          message: 'هناك طلاب مسجلين في هذه المجموعة. هل أنت متأكد من حذفها؟',
+          details: {
+            enrollments: enrolledCount
+          }
+        });
+      }
+
+      // If force delete, update enrollments to remove group_id
+      if (enrolledCount > 0) {
+        db.run('UPDATE enrollments SET group_id = NULL WHERE group_id = ?', [groupId], (err) => {
+          if (err) {
+            return res.status(500).json({ error: 'خطأ في تحديث تسجيلات الطلاب: ' + err.message });
+          }
+
+          // Now delete the group
+          deleteGroup();
+        });
+      } else {
+        // No enrollments, delete directly
+        deleteGroup();
+      }
+
+      function deleteGroup() {
+        db.run('DELETE FROM course_groups WHERE id = ?', [groupId], function(err) {
+          if (err) {
+            return res.status(500).json({ error: 'خطأ في حذف المجموعة: ' + err.message });
+          }
+
+          // Get course_id before responding
+          const courseId = group.course_id;
+
+          // Update course max_students
+          updateCourseMaxStudents(courseId, (updateErr, updatedCourse) => {
+            if (updateErr) {
+              console.error(`Error updating max_students for course ${courseId}:`, updateErr.message);
+              // Continue anyway to return success
+            }
+
+            res.json({
+              success: true,
+              message: 'تم حذف المجموعة بنجاح',
+              course_max_students: updatedCourse ? updatedCourse.max_students : null
+            });
+          });
+        });
+      }
+    });
+  });
+});
+
+// Get a single group by ID
+app.get('/api/admin/course/groups/:id', adminMiddleware, (req, res) => {
+  const groupId = req.params.id;
+
+  // Get group details with course information
+  db.get(`
+    SELECT
+      g.*,
+      c.name as course_name,
+      c.course_code,
+      (SELECT COUNT(*) FROM enrollments WHERE course_id = g.course_id AND group_id = g.id) as enrolled_students
+    FROM course_groups g
+    JOIN courses c ON g.course_id = c.id
+    WHERE g.id = ?
+  `, [groupId], (err, group) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+
+    if (!group) {
+      return res.status(404).json({ error: 'المجموعة غير موجودة' });
+    }
+
+    // Calculate enrollment percentage
+    let enrollmentPercentage = 0;
+    if (group.max_students > 0) {
+      const exactPercentage = (group.enrolled_students / group.max_students) * 100;
+      enrollmentPercentage = Math.round(exactPercentage * 100) / 100;
+    }
+
+    // Add enrollment percentage to group data
+    group.enrollment_percentage = enrollmentPercentage;
+
+    res.json({
+      group: group
+    });
+  });
+});
+
+// Get students in a group
+app.get('/api/admin/course/groups/:id/students', adminMiddleware, (req, res) => {
+  const groupId = req.params.id;
+
+  // Get group details
+  db.get(`
+    SELECT
+      g.*,
+      c.name as course_name,
+      c.course_code
+    FROM course_groups g
+    JOIN courses c ON g.course_id = c.id
+    WHERE g.id = ?
+  `, [groupId], (err, group) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+
+    if (!group) {
+      return res.status(404).json({ error: 'المجموعة غير موجودة' });
+    }
+
+    // Get students in this group
+    db.all(`
+      SELECT
+        s.id,
+        s.student_id,
+        s.name,
+        s.registration_number,
+        s.semester,
+        d.name as department_name,
+        e.created_at as enrollment_date
+      FROM enrollments e
+      JOIN students s ON e.student_id = s.id
+      LEFT JOIN departments d ON s.department_id = d.id
+      WHERE e.course_id = ? AND e.group_id = ?
+      ORDER BY s.name
+    `, [group.course_id, groupId], (err, students) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+
+      res.json({
+        group: group,
+        students: students
+      });
+    });
+  });
+});
+
+// Student: Get available groups for a course
+app.get('/api/student/course/:id/groups', authMiddleware, (req, res) => {
+  if (req.session.user.role !== 'student') {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const courseId = req.params.id;
+
+  // Get student info
+  db.get(`
+    SELECT s.* FROM students s
+    JOIN users u ON s.user_id = u.id
+    WHERE u.id = ?
+  `, [req.session.user.id], (err, student) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    // Get course info
+    db.get('SELECT * FROM courses WHERE id = ?', [courseId], (err, course) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+
+      if (!course) {
+        return res.status(404).json({ error: 'Course not found' });
+      }
+
+      // Check if student is already enrolled in this course
+      db.get('SELECT * FROM enrollments WHERE student_id = ? AND course_id = ?',
+        [student.id, courseId], (err, enrollment) => {
+        if (err) {
+          return res.status(500).json({ error: err.message });
+        }
+
+        // Get available groups for this course
+        db.all(`
+          SELECT
+            g.*,
+            (SELECT COUNT(*) FROM enrollments WHERE course_id = g.course_id AND group_id = g.id) as enrolled_students
+          FROM course_groups g
+          WHERE g.course_id = ?
+          ORDER BY g.group_name
+        `, [courseId], (err, groups) => {
+          if (err) {
+            return res.status(500).json({ error: err.message });
+          }
+
+          // Process groups to add availability info
+          const processedGroups = groups.map(group => {
+            const isFull = group.enrolled_students >= group.max_students;
+            let enrollmentPercentage = 0;
+
+            if (group.max_students > 0) {
+              const exactPercentage = (group.enrolled_students / group.max_students) * 100;
+              enrollmentPercentage = Math.round(exactPercentage * 100) / 100;
+            }
+
+            return {
+              ...group,
+              is_full: isFull,
+              enrollment_percentage: enrollmentPercentage,
+              can_register: !isFull
+            };
+          });
+
+          res.json({
+            course: course,
+            groups: processedGroups,
+            current_enrollment: enrollment || null
+          });
+        });
+      });
+    });
+  });
+});
+
+// Student: Enroll in a course with group selection
+app.post('/api/student/enroll-with-group', authMiddleware, (req, res) => {
+  if (req.session.user.role !== 'student') {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const { course_id, group_id } = req.body;
+
+  if (!course_id || !group_id) {
+    return res.status(400).json({ error: 'Course ID and Group ID are required' });
+  }
+
+  // Get student info
+  db.get(`
+    SELECT s.* FROM students s
+    JOIN users u ON s.user_id = u.id
+    WHERE u.id = ?
+  `, [req.session.user.id], (err, student) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    // Check if registration is open
+    db.get('SELECT value FROM system_settings WHERE key = ?', ['registration_open'], (err, setting) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+
+      const registrationOpen = setting && setting.value === 'true';
+
+      if (!registrationOpen) {
+        return res.status(403).json({ error: 'Registration is currently closed' });
+      }
+
+      // Check if student is already enrolled in this course
+      db.get('SELECT * FROM enrollments WHERE student_id = ? AND course_id = ?',
+        [student.id, course_id], (err, existingEnrollment) => {
+        if (err) {
+          return res.status(500).json({ error: err.message });
+        }
+
+        if (existingEnrollment) {
+          return res.status(400).json({ error: 'You are already enrolled in this course' });
+        }
+
+        // Check if student has completed this course
+        db.get('SELECT * FROM completed_courses WHERE student_id = ? AND course_id = ?',
+          [student.id, course_id], (err, completedCourse) => {
+          if (err) {
+            return res.status(500).json({ error: err.message });
+          }
+
+          if (completedCourse) {
+            return res.status(400).json({ error: 'You have already completed this course' });
+          }
+
+          // Check if student has reached the maximum number of courses
+          db.get('SELECT COUNT(*) as count FROM enrollments WHERE student_id = ?', [student.id], (err, enrollmentCount) => {
+            if (err) {
+              return res.status(500).json({ error: err.message });
+            }
+
+            // Get max courses limit
+            db.get('SELECT value FROM system_settings WHERE key = ?', ['max_courses_limit'], (err, maxCoursesLimit) => {
+              if (err) {
+                return res.status(500).json({ error: err.message });
+              }
+
+              const maxCourses = maxCoursesLimit ? parseInt(maxCoursesLimit.value) : 6;
+
+              if (enrollmentCount.count >= maxCourses) {
+                return res.status(400).json({ error: `You have reached the maximum number of courses (${maxCourses})` });
+              }
+
+              // Check if all prerequisites are met
+              db.all('SELECT prerequisite_id FROM prerequisites WHERE course_id = ?', [course_id], (err, prerequisites) => {
+                if (err) {
+                  return res.status(500).json({ error: err.message });
+                }
+
+                // If there are prerequisites, check if student has completed them
+                if (prerequisites.length > 0) {
+                  const prerequisiteIds = prerequisites.map(p => p.prerequisite_id);
+
+                  // Count how many prerequisites the student has completed
+                  db.all('SELECT course_id FROM completed_courses WHERE student_id = ? AND course_id IN (' +
+                    prerequisiteIds.map(() => '?').join(',') + ')',
+                    [student.id, ...prerequisiteIds], (err, completedPrerequisites) => {
+                    if (err) {
+                      return res.status(500).json({ error: err.message });
+                    }
+
+                    // Check if all prerequisites are met
+                    if (completedPrerequisites.length < prerequisites.length) {
+                      return res.status(400).json({ error: 'Not all prerequisites are met for this course' });
+                    }
+
+                    // Check if the selected group exists and is not full
+                    db.get('SELECT * FROM course_groups WHERE id = ? AND course_id = ?',
+                      [group_id, course_id], (err, group) => {
+                      if (err) {
+                        return res.status(500).json({ error: err.message });
+                      }
+
+                      if (!group) {
+                        return res.status(404).json({ error: 'Group not found' });
+                      }
+
+                      // Check if group is full
+                      db.get('SELECT COUNT(*) as count FROM enrollments WHERE course_id = ? AND group_id = ?',
+                        [course_id, group_id], (err, groupEnrollmentCount) => {
+                        if (err) {
+                          return res.status(500).json({ error: err.message });
+                        }
+
+                        if (groupEnrollmentCount.count >= group.max_students) {
+                          return res.status(400).json({ error: 'This group is full' });
+                        }
+
+                        // Enroll student in the course with the selected group
+                        db.run('INSERT INTO enrollments (student_id, course_id, group_id) VALUES (?, ?, ?)',
+                          [student.id, course_id, group_id], function(err) {
+                          if (err) {
+                            return res.status(500).json({ error: err.message });
+                          }
+
+                          res.json({
+                            success: true,
+                            enrollment: {
+                              id: this.lastID,
+                              student_id: student.id,
+                              course_id: course_id,
+                              group_id: group_id
+                            }
+                          });
+                        });
+                      });
+                    });
+                  });
+                } else {
+                  // No prerequisites, check if the selected group exists and is not full
+                  db.get('SELECT * FROM course_groups WHERE id = ? AND course_id = ?',
+                    [group_id, course_id], (err, group) => {
+                    if (err) {
+                      return res.status(500).json({ error: err.message });
+                    }
+
+                    if (!group) {
+                      return res.status(404).json({ error: 'Group not found' });
+                    }
+
+                    // Check if group is full
+                    db.get('SELECT COUNT(*) as count FROM enrollments WHERE course_id = ? AND group_id = ?',
+                      [course_id, group_id], (err, groupEnrollmentCount) => {
+                      if (err) {
+                        return res.status(500).json({ error: err.message });
+                      }
+
+                      if (groupEnrollmentCount.count >= group.max_students) {
+                        return res.status(400).json({ error: 'This group is full' });
+                      }
+
+                      // Enroll student in the course with the selected group
+                      db.run('INSERT INTO enrollments (student_id, course_id, group_id) VALUES (?, ?, ?)',
+                        [student.id, course_id, group_id], function(err) {
+                        if (err) {
+                          return res.status(500).json({ error: err.message });
+                        }
+
+                        res.json({
+                          success: true,
+                          enrollment: {
+                            id: this.lastID,
+                            student_id: student.id,
+                            course_id: course_id,
+                            group_id: group_id
+                          }
+                        });
+                      });
+                    });
+                  });
+                }
+              });
+            });
+          });
+        });
+      });
+    });
+  });
+});
+
+// Function to update max_students for a course
+function updateCourseMaxStudents(courseId, callback) {
+  console.log(`Updating max_students for course ${courseId}...`);
+
+  // Get all groups for this course
+  db.all('SELECT id, group_name, max_students FROM course_groups WHERE course_id = ?', [courseId], (err, groups) => {
+    if (err) {
+      console.error(`Error getting groups for course ${courseId}:`, err.message);
+      if (callback) callback(err);
+      return;
+    }
+
+    console.log(`Found ${groups.length} groups for course ${courseId}`);
+
+    // Calculate total capacity
+    let totalCapacity = 0;
+    groups.forEach(group => {
+      const groupCapacity = parseInt(group.max_students) || 0;
+      console.log(`Group ${group.group_name} (ID: ${group.id}) has capacity: ${groupCapacity}`);
+      totalCapacity += groupCapacity;
+    });
+
+    console.log(`Total capacity for course ${courseId}: ${totalCapacity}`);
+
+    // Update the course max_students
+    db.run('UPDATE courses SET max_students = ? WHERE id = ?', [totalCapacity, courseId], function(err) {
+      if (err) {
+        console.error(`Error updating max_students for course ${courseId}:`, err.message);
+        if (callback) callback(err);
+        return;
+      }
+
+      console.log(`Successfully updated max_students for course ${courseId} to ${totalCapacity}`);
+
+      // Verify the update
+      db.get('SELECT max_students FROM courses WHERE id = ?', [courseId], (verifyErr, verifyResult) => {
+        if (verifyErr) {
+          console.error(`Error verifying max_students update for course ${courseId}:`, verifyErr.message);
+          if (callback) callback(verifyErr);
+          return;
+        }
+
+        console.log(`Verified max_students for course ${courseId}: ${verifyResult.max_students}`);
+        if (callback) callback(null, { id: courseId, max_students: totalCapacity });
+      });
+    });
+  });
+}
+
+// Function to update max_students for all courses
+function updateAllCoursesMaxStudents(callback) {
+  console.log('Updating max_students for all courses...');
+
+  // Get all courses
+  db.all('SELECT id, course_code, name FROM courses', [], (err, courses) => {
+    if (err) {
+      console.error('Error getting courses:', err.message);
+      if (callback) callback(err);
+      return;
+    }
+
+    console.log(`Found ${courses.length} courses to update`);
+
+    // Use a promise to process courses sequentially
+    let promise = Promise.resolve();
+    let updatedCourses = [];
+
+    courses.forEach(course => {
+      promise = promise.then(() => {
+        return new Promise((resolve) => {
+          console.log(`Processing course ${course.course_code} (${course.name}) with ID ${course.id}...`);
+
+          updateCourseMaxStudents(course.id, (err, updatedCourse) => {
+            if (err) {
+              console.error(`Error updating max_students for course ${course.id}:`, err.message);
+            } else if (updatedCourse) {
+              updatedCourses.push(updatedCourse);
+            }
+            resolve();
+          });
+        });
+      });
+    });
+
+    promise.then(() => {
+      console.log('Finished updating max_students for all courses');
+      if (callback) callback(null, updatedCourses);
+    });
+  });
+}
+
 // Start server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+
+  // Update max_students for all courses on server start
+  updateAllCoursesMaxStudents((err, updatedCourses) => {
+    if (err) {
+      console.error('Error updating max_students for all courses on server start:', err.message);
+    } else {
+      console.log(`Updated max_students for ${updatedCourses ? updatedCourses.length : 0} courses on server start`);
+    }
+  });
 });
